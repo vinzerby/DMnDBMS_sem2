@@ -1,0 +1,47 @@
+-- Creating table
+	CREATE TABLE MyTable(id NUMBER PRIMARY KEY, val NUMBER NOT NULL);
+	
+	-- Check table exists
+	SELECT TABLE_NAME FROM ALL_TABLES
+	WHERE TABLE_NAME = 'MYTABLE';
+
+
+-- Creating trigger for primary key autoincrement
+	CREATE SEQUENCE MyTable_id_seq
+		START WITH 1
+		INCREMENT BY 1
+		NOCACHE;
+	
+	-- Check sequence created correctly
+	SELECT OBJECT_NAME, STATUS, LAST_DDL_TIME
+	FROM USER_OBJECTS
+	WHERE OBJECT_NAME = 'MYTABLE_ID_SEQ'
+	AND OBJECT_TYPE = 'SEQUENCE';
+	
+	CREATE OR REPLACE TRIGGER MyTable_before_insert
+	BEFORE INSERT ON MyTable
+	FOR EACH ROW 
+	BEGIN
+		IF :NEW.id IS NULL THEN
+			SELECT MyTable_id_seq.NEXTVAL INTO :NEW.id FROM dual;
+		END IF;
+	END;
+	
+	-- Check trigger created correctly
+	SELECT OBJECT_NAME, STATUS, LAST_DDL_TIME
+	FROM USER_OBJECTS
+	WHERE OBJECT_NAME = 'MYTABLE_BEFORE_INSERT'
+	AND OBJECT_TYPE = 'TRIGGER';
+
+
+-- Insert random values into table
+	BEGIN
+		DELETE FROM MyTable;
+	
+		INSERT INTO MyTable (val)
+		SELECT FLOOR(DBMS_RANDOM.VALUE(1, 1001)) FROM dual
+		CONNECT BY LEVEL <= 10000;
+	END;
+
+		
+SELECT * FROM MyTable;
