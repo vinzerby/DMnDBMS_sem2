@@ -1,0 +1,2 @@
+user: DMnDBMS_sem2
+password: 1234

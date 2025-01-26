@@ -1,0 +1,4 @@
+# Oracle temp files
+*.log
+*.trc
+*.aud
