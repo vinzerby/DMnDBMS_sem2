@@ -92,7 +92,29 @@
 	END;
 	
 
+--Generates text sql query for inserting string with given id and val 
+	CREATE OR REPLACE FUNCTION gen_insert(id NUMBER, val NUMBER) RETURN VARCHAR2
+	IS 
+		query VARCHAR2(256);
+		row_exists NUMBER;
+	BEGIN
+		SELECT COUNT(1) INTO row_exists FROM MyTable WHERE MyTable.id = gen_insert.id;
+		IF row_exists > 0 THEN
+			DBMS_OUTPUT.PUT_LINE('Внимание! Строка с id=' || id || ' уже существует!');
+		END IF;
+		query := 'INSERT INTO MyTable(id, val) VALUES (' || id || ', ' || val || ');';
+		RETURN query;
+	END gen_insert;
 
+	SELECT OBJECT_NAME, STATUS
+	FROM USER_OBJECTS
+	WHERE OBJECT_NAME = 'GEN_INSERT'
+	AND OBJECT_TYPE = 'FUNCTION';
+	
+	BEGIN
+		DBMS_OUTPUT.PUT_LINE(gen_insert(5000, 2));
+	END;
+	
 
 
 
