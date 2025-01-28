@@ -2,3 +2,5 @@
 *.log
 *.trc
 *.aud
+
+theory/
