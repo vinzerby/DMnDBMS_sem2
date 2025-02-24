@@ -115,7 +115,34 @@
 		DBMS_OUTPUT.PUT_LINE(gen_insert(5000, 2));
 	END;
 	
-
+	CREATE OR REPLACE FUNCTION gen_insert_new(id NUMBER) RETURN VARCHAR2
+	IS 
+		query VARCHAR2(256);
+		row_exists NUMBER;
+		existing_val NUMBER := 0;
+		val NUMBER := 0;
+	BEGIN
+		SELECT COUNT(1) INTO row_exists FROM MyTable WHERE MyTable.id = gen_insert_new.id;
+		IF row_exists > 0 THEN
+			SELECT VAL INTO EXISTING_VAL FROM MyTable WHERE MyTable.id = gen_insert_new.id;
+			VAL := EXISTING_VAL;
+			DBMS_OUTPUT.PUT_LINE('Обнаружена запись с id=' || id || ', val =' || VAL);
+		ELSE
+			SELECT FLOOR(DBMS_RANDOM.VALUE(1, 1001)) INTO VAL FROM dual;
+			DBMS_OUTPUT.PUT_LINE('Запись с id=' || id || ', не обнаружена, сгенерировано значение val =' || VAL);
+		END IF;
+		query := 'INSERT INTO MyTable(id, val) VALUES (' || id || ', ' || val || ');';
+		RETURN query;
+	END gen_insert_new;
+	
+	BEGIN
+		DBMS_OUTPUT.PUT_LINE(gen_insert_new(10030));
+	END;
+	
+	SELECT OBJECT_NAME, STATUS
+	FROM USER_OBJECTS
+	WHERE OBJECT_NAME = 'GEN_INSERT_NEW'
+	AND OBJECT_TYPE = 'FUNCTION';
 
 
 

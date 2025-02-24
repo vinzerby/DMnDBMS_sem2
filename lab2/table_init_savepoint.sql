@@ -1,22 +1,14 @@
--- Create flags
-	CREATE OR REPLACE PACKAGE FLAGS AS
-		IS_GROUPS_ID_UPDATED BOOLEAN := FALSE;
-		IS_STUDENTS_GROUPID_UPDATED BOOLEAN := FALSE;
-	END FLAGS;
-	
-	
--- Create tables
+
+--Create tables
 	CREATE TABLE STUDENTS (ID NUMBER PRIMARY KEY, NAME VARCHAR2(256) NOT NULL, GROUP_ID NUMBER NOT NULL);
 
 	CREATE TABLE GROUPS(ID NUMBER PRIMARY KEY, NAME VARCHAR2(64) NOT NULL, C_VAL NUMBER NOT NULL);
 	
-	-- Delete it. wont be used in the future
 	CREATE TABLE TEMP_STUDENTS_TO_CASCADE_DELETE (GROUP_ID NUMBER NOT NULL);
 	
 	CREATE INDEX IDX_STUDENTS_GROUP_ID ON STUDENTS(GROUP_ID);
 
-	
--- Create triggers for autoincrementing unique ids
+--Create triggers for autoincrementing unique ids
 	CREATE SEQUENCE STUDENTS_ID_SEQ
 	START WITH 1
 	INCREMENT BY 1
@@ -35,10 +27,6 @@
 -- II.	Update c_vals at AFTER STATEMENT block. To do this info about updated groups need to be collected.
 --		Is it possible to update all GROUPS with one query? Will it even be faster?
 --
--- III. Add trigger to check if c_val is changed. Students table's triggers should set flag C_VAL_UPDATED
---		and groups table's triggers should block any update on c_val if this flag is not set (c_val is changed
---		by user if this flag is not set which is forbidden)
-	
 	
 	
 --This triggers must provide following features:
@@ -109,6 +97,52 @@
 	END STUDENTS_COMPOUND_INSERT;
 	
 	
+	CREATE OR REPLACE TRIGGER STUDENTS_BEFORE_INSERT
+	BEFORE INSERT ON STUDENTS
+	FOR EACH ROW
+	DECLARE
+	    pragma autonomous_transaction;
+
+		NEW_ID NUMBER;
+		NEW_ID_IN_TABLE_COUNT NUMBER := 9999;
+		GROUPS_WITH_GIVEN_ID NUMBER := 0;	
+	
+		GROUP_ID_NOT_EXISTS EXCEPTION;
+		NOT_UNIQUE_ID EXCEPTION;
+	BEGIN
+		--Foreign key consistency
+		SELECT COUNT(1) INTO GROUPS_WITH_GIVEN_ID FROM GROUPS WHERE GROUPS.ID = :NEW.GROUP_ID;
+		IF GROUPS_WITH_GIVEN_ID < 1 THEN
+			RAISE GROUP_ID_NOT_EXISTS;
+		END IF;
+		
+		--User can forcefully update record with new ID, in this case it's needed to check
+		--Value for sequence for uniqueness
+		IF :NEW.ID  IS NULL THEN
+			WHILE NEW_ID_IN_TABLE_COUNT > 0
+			LOOP
+				SELECT STUDENTS_ID_SEQ.NEXTVAL INTO NEW_ID FROM dual;
+				SELECT COUNT(1) INTO NEW_ID_IN_TABLE_COUNT FROM STUDENTS WHERE STUDENTS.ID = NEW_ID;
+			END LOOP;	
+			:NEW.ID := NEW_ID;
+				
+		--Id is given
+		ELSE
+			SELECT COUNT(1) INTO NEW_ID_IN_TABLE_COUNT FROM STUDENTS WHERE STUDENTS.ID = :NEW.ID;
+			IF NEW_ID_IN_TABLE_COUNT > 0 THEN 
+				RAISE NOT_UNIQUE_ID;
+			END IF;
+		
+		END IF;
+		
+	EXCEPTION
+		WHEN GROUP_ID_NOT_EXISTS THEN
+ 			DBMS_OUTPUT.PUT_LINE('Соответствующей записи ' || :NEW.GROUP_ID || ' в таблице GROUPS не существует');
+			RAISE_APPLICATION_ERROR(-20001, 'Соответствующей записи ' || :NEW.GROUP_ID || ' в таблице GROUPS не существует');
+		WHEN NOT_UNIQUE_ID THEN
+ 			DBMS_OUTPUT.PUT_LINE('Первичный ключ ID= ' || :NEW.ID || ' не является уникальным');
+			RAISE_APPLICATION_ERROR(-20002, 'Первичный ключ ID= ' || :NEW.ID || ' не является уникальным');
+	END;
 	
 	CREATE OR REPLACE TRIGGER STUDENTS_BEFORE_UPDATE
 	BEFORE UPDATE ON STUDENTS
@@ -223,69 +257,53 @@
 	END GROUPS_COMPOUND_INSERT;
 	
 	
-	CREATE OR REPLACE TRIGGER GROUPS_COMPOUND_UPDATE
-	FOR UPDATE OF ID, NAME ON GROUPS
-	COMPOUND TRIGGER
-		NEW_ID			NUMBER := 0;
 	
-		TYPE Names_t	IS TABLE OF GROUPS.NAME%TYPE;
-		Group_names		Names_t;
-		
-		TYPE IDs_t		IS TABLE OF GROUPS.ID%TYPE;
-		Group_IDs		IDs_t;
-		
-		BEFORE STATEMENT IS
-		BEGIN			
-			IF UPDATING('ID') THEN
-				-- this flag is used in students on update triggers to check if it is 
-				-- needed to update parent c_val when student's GROUP_ID is changed.
-				-- this flag shows that change of student's GROUP_ID is caused by c
-				-- hanging group's id therefore updating of c_val is not needed
-				-- because no student was transfered to another group
-				FLAGS.IS_GROUPS_ID_UPDATED := TRUE;
-				
-				SELECT ID BULK COLLECT INTO Group_IDs FROM GROUPS;
-			END IF;
-			IF UPDATING('NAME') THEN
-				SELECT NAME BULK COLLECT INTO Group_names FROM GROUPS;
-			END IF;
-		END BEFORE STATEMENT;
-		
-		BEFORE EACH ROW IS
-		BEGIN
-			-- Check unique name
-			IF UPDATING('NAME') THEN
-				IF (:NEW.NAME MEMBER OF Group_names) THEN
-	 				RAISE_APPLICATION_ERROR(-20005, 'Группа с именем ' || :NEW.NAME || ' уже существует');
-				END IF; 
-			END IF;
-		
-			-- Check unique id
-			IF UPDATING('ID') THEN
-				IF (:NEW.ID MEMBER OF Group_IDs) THEN
-					RAISE_APPLICATION_ERROR(-20006, 'Группа с ID= ' || :NEW.ID || ' уже существует');
-				END IF;
-			END IF;
-		END BEFORE EACH ROW;
-			
-		AFTER EACH ROW IS
-		BEGIN
-			IF UPDATING('ID') THEN
-				-- Update child students
-				UPDATE STUDENTS SET GROUP_ID=:NEW.ID WHERE GROUP_ID=:OLD.ID;
-			END IF;
-		END AFTER EACH ROW;
-		
-		AFTER STATEMENT IS
-		BEGIN
-			IF UPDATING('ID') THEN
-				-- drop flag after updating child students
-				FLAGS.IS_GROUPS_ID_UPDATED := FALSE;
-			END IF;
-		END AFTER STATEMENT;
-		
-	END GROUPS_COMPOUND_UPDATE;
 	
+	CREATE OR REPLACE TRIGGER GROUPS_BEFORE_INSERT
+	BEFORE INSERT ON GROUPS
+	FOR EACH ROW 
+	DECLARE 
+	    pragma autonomous_transaction;
+	
+		GROUPS_WITH_NEW_NAME_COUNT NUMBER := 0;
+		NEW_ID NUMBER := 0;
+		NEW_ID_IN_TABLE_COUNT NUMBER := 0;
+	
+		NOT_UNIQUE_GROUP_NAME EXCEPTION;
+		NOT_UNIQUE_ID EXCEPTION;
+	BEGIN 
+		IF :NEW.C_VAL != 0 THEN
+ 			DBMS_OUTPUT.PUT_LINE('Параметр ' || :NEW.C_VAL || ' принудительно установлен в значение 0');
+		END IF;
+		:NEW.C_VAL := 0;
+		
+		SELECT COUNT(1) INTO GROUPS_WITH_NEW_NAME_COUNT FROM GROUPS WHERE NAME = :NEW.NAME;
+		IF GROUPS_WITH_NEW_NAME_COUNT > 0 THEN
+			RAISE NOT_UNIQUE_GROUP_NAME;
+		END IF;
+		
+		IF :NEW.ID IS NULL THEN
+			LOOP
+				SELECT GROUPS_ID_SEQ.NEXTVAL INTO NEW_ID FROM DUAL;
+				SELECT COUNT(1) INTO NEW_ID_IN_TABLE_COUNT FROM GROUPS WHERE ID = NEW_ID;
+				EXIT WHEN NEW_ID_IN_TABLE_COUNT = 0;
+			END LOOP;
+			:NEW.ID := NEW_ID;
+		ELSE
+			SELECT COUNT(1) INTO NEW_ID_IN_TABLE_COUNT FROM GROUPS WHERE ID = :NEW.ID;
+			IF NEW_ID_IN_TABLE_COUNT > 0 THEN
+				RAISE NOT_UNIQUE_ID;
+			END IF;
+		END IF;
+		
+	EXCEPTION
+		WHEN NOT_UNIQUE_GROUP_NAME THEN
+ 			DBMS_OUTPUT.PUT_LINE('Группа с именем ' || :NEW.NAME || ' уже существует');
+ 			RAISE_APPLICATION_ERROR(-20005, 'Группа с именем ' || :NEW.NAME || ' уже существует');
+		WHEN NOT_UNIQUE_ID THEN
+ 			DBMS_OUTPUT.PUT_LINE('Группа с ID= ' || :NEW.ID || ' уже существует');
+			RAISE_APPLICATION_ERROR(-20006, 'Группа с ID= ' || :NEW.ID || ' уже существует');
+	END;
 	
 	--Update all connected records in students
 	--C_VAL is setted as amount of students by trigger and can't be changed by update
@@ -422,14 +440,13 @@
 	END;
 	
 	            
--- PACKAGE FLAGS 
+-- 
 
 
 	            
 DROP TRIGGER GROUPS_BEFORE_INSERT;
 DROP TRIGGER STUDENTS_BEFORE_INSERT;
 DROP TRIGGER GROUPS_UPDATE_CASCADE;
-DROP TRIGGER STUDENTS_AFTER_INSERT;
 
 DROP TRIGGER GROUPS_BEFORE_UPDATE;
 DROP TRIGGER GROUPS_AFTER_UPDATE;
@@ -437,15 +454,15 @@ DROP TRIGGER GROUPS_AFTER_UPDATE;
 -- Check objects are created correctly
 SELECT OBJECT_TYPE, OBJECT_NAME, STATUS
 FROM USER_OBJECTS
-WHERE OBJECT_NAME IN ('STUDENTS', 'GROUPS', 'IDX_STUDENTS_GROUP_ID', 'FLAGS',
+WHERE OBJECT_NAME IN ('STUDENTS', 'GROUPS', 'IDX_STUDENTS_GROUP_ID',
 'STUDENTS_ID_SEQ', 'GROUPS_ID_SEQ', 'STUDENTS_BEFORE_INSERT', 
 'STUDENTS_BEFORE_UPDATE', 'STUDENTS_AFTER_INSERT',
 'STUDENTS_AFTER_UPDATE', 'STUDENTS_AFTER_DELETE',
 'GROUPS_BEFORE_INSERT', 'GROUPS_BEFORE_UPDATE', 'GROUPS_AFTER_UPDATE',
 'GROUPS_BEFORE_DELETE', 'GROUPS_AFTER_DELETE', 'PROC_CASCADE_DELETE_STUDENTS',
 'GROUPS_UPDATE_CASCADE',
-'GROUPS_COMPOUND_INSERT', 'STUDENTS_COMPOUND_INSERT', 'GROUPS_COMPOUND_UPDATE')
-AND OBJECT_TYPE IN ('TABLE', 'SEQUENCE', 'TRIGGER', 'PROCEDURE', 'INDEX', 'PACKAGE')
+'GROUPS_COMPOUND_INSERT', 'STUDENTS_COMPOUND_INSERT')
+AND OBJECT_TYPE IN ('TABLE', 'SEQUENCE', 'TRIGGER', 'PROCEDURE', 'INDEX')
 ORDER BY OBJECT_TYPE, OBJECT_NAME;
 	
 	
