@@ -11,6 +11,14 @@
 		
 		-- Is setted when student is deleted and parent's c_val need to be decremented
 		IS_STUDENTS_DELETED BOOLEAN := FALSE;
+		
+		-- Is setted when tables are restored by log
+		IS_RESTORING_TABLES_BY_LOG BOOLEAN := FALSE;
+		
+		-- Indicates that DB is in history mode, created by jumping to timestamp log. Blocks new jumpings
+		IS_JUMPED_TO_TIMESTAMP BOOLEAN := FALSE;
+		
+		JUMPED_TIMESTAMP TIMESTAMP;
 	END FLAGS;
 	
 	
@@ -38,17 +46,14 @@
 	
 	
 -- TODO:
--- I. 	Allow to change c_val only via triggers and block changing with regular query by using
---		packages. Packages may give permissions for triggers to update c_val
 --
--- II.	Update c_vals at AFTER STATEMENT block. To do this info about updated groups need to be collected.
+-- I.	Update c_vals at AFTER STATEMENT block. To do this info about updated groups need to be collected.
 --		Is it possible to update all GROUPS with one query? Will it even be faster?
 --
--- III. Add trigger to check if c_val is changed. Students table's triggers should set flag C_VAL_UPDATED
+-- II.	Add trigger to check if c_val is changed. Students table's triggers should set flag C_VAL_UPDATED
 --		and groups table's triggers should block any update on c_val if this flag is not set (c_val is changed
 --		by user if this flag is not set which is forbidden)
 --
--- IV.	Solve problem when updating record with same id/name causes error. Example: UPDATE STUDENTS SET ID = 7 WHERE ID = 7;
 	
 	
 --This triggers must provide following features:
@@ -57,6 +62,11 @@
 --2. Check the uniqueness of the id when given on both insert and update operations
 --3. Check the uniqueness of the GROUPS.NAME on both insert and update operations
 --4. Control if value given to STUDENTS.GROUP_ID exists in GROUPS.ID on insert and update
+	
+
+	
+-- About logging:
+-- 1. c_val can't be changed manually therefore all changes to c_val is not logged
 	
 	
 	
@@ -119,6 +129,13 @@
 		BEGIN
 			-- Update c_val of parent group
 			UPDATE GROUPS SET C_VAL = C_VAL + 1 WHERE GROUPS.ID = :NEW.GROUP_ID;
+		
+			-- Log insertion to STUDENTS if not restoring table condition by logs
+			IF NOT FLAGS.IS_RESTORING_TABLES_BY_LOG THEN
+				INSERT INTO LOGS (TABLE_NAME, OPERATION_TYPE, ID_OLD, ID_NEW, NAME_OLD, NAME_NEW, NUMB_FIELD_OLD, NUMB_FIELD_NEW)
+				VALUES('STUDENTS', 'INSERT', NULL, :NEW.ID, NULL, :NEW.NAME, NULL, :NEW.GROUP_ID);
+			END IF;
+			
 		END AFTER EACH ROW;
 		
 		AFTER STATEMENT IS
@@ -166,7 +183,7 @@
 		BEFORE EACH ROW IS
 		BEGIN
 			-- Check unique name
-			IF UPDATING('NAME') THEN
+			IF (UPDATING('NAME') AND :NEW.NAME != :OLD.NAME) THEN
 				IF (:NEW.NAME MEMBER OF Student_names) THEN
 					FLAGS.IS_STUDENTS_GROUPID_UPDATED := FALSE;
 	 				RAISE_APPLICATION_ERROR(-20105, 'Студент с именем ' || :NEW.NAME || ' уже существует');
@@ -174,14 +191,14 @@
 			END IF;
 		
 			-- Check unique id
-			IF UPDATING('ID') THEN
+			IF (UPDATING('ID') AND :NEW.ID != :OLD.ID) THEN
 				IF (:NEW.ID MEMBER OF Student_IDs) THEN
 					FLAGS.IS_STUDENTS_GROUPID_UPDATED := FALSE;
 					RAISE_APPLICATION_ERROR(-20002, 'Первичный ключ ID= ' || :NEW.ID || ' не является уникальным');
 				END IF;
 			END IF;
 		
-			IF UPDATING('GROUP_ID') THEN
+			IF (UPDATING('GROUP_ID') AND :NEW.GROUP_ID != :OLD.GROUP_ID) THEN
 				-- This check is needed only when group_id changed by user (when student is transfered to another group),
 				-- unless group_id changed by FOR UPDATE OF GROUPS trigger and no need for check
 				IF NOT FLAGS.IS_GROUPS_ID_UPDATED THEN
@@ -195,13 +212,22 @@
 		
 		AFTER EACH ROW IS
 		BEGIN
-			IF UPDATING('GROUP_ID') THEN
+			IF (UPDATING('GROUP_ID') AND :NEW.GROUP_ID != :OLD.GROUP_ID) THEN
 				-- update c_val if group_id is changed via moving student for one group to another
 				IF NOT FLAGS.IS_GROUPS_ID_UPDATED THEN
 					UPDATE GROUPS SET C_VAL = C_VAL-1 WHERE GROUPS.ID = :OLD.GROUP_ID;
 					UPDATE GROUPS SET C_VAL = C_VAL+1 WHERE GROUPS.ID = :NEW.GROUP_ID;
 				END IF;
 			END IF;
+		
+			-- If STUDENTS table changed by user (and not cascading from changing parent group) and LOG is not restored
+			IF NOT FLAGS.IS_GROUPS_ID_UPDATED THEN
+				IF NOT FLAGS.IS_RESTORING_TABLES_BY_LOG THEN
+					INSERT INTO LOGS (TABLE_NAME, OPERATION_TYPE, ID_OLD, ID_NEW, NAME_OLD, NAME_NEW, NUMB_FIELD_OLD, NUMB_FIELD_NEW)
+					VALUES('STUDENTS', 'UPDATE', :OLD.ID, :NEW.ID, :OLD.NAME, :NEW.NAME, :OLD.GROUP_ID, :NEW.GROUP_ID);
+				END IF;
+			END IF;
+			
 		END AFTER EACH ROW;
 				
 		AFTER STATEMENT IS
@@ -231,11 +257,21 @@
 			END IF;
 		END BEFORE EACH ROW;
 		
+		AFTER EACH ROW IS
+		BEGIN
+			-- Add to log if this action is not invoked by restoring table conditions via logs
+			IF NOT FLAGS.IS_RESTORING_TABLES_BY_LOG THEN
+				INSERT INTO LOGS (TABLE_NAME, OPERATION_TYPE, ID_OLD, ID_NEW, NAME_OLD, NAME_NEW, NUMB_FIELD_OLD, NUMB_FIELD_NEW)
+				VALUES('STUDENTS', 'DELETE', :OLD.ID, NULL, :OLD.NAME, NULL, :OLD.GROUP_ID, NULL);
+			END IF;
+		END AFTER EACH ROW;
+		
 		AFTER STATEMENT IS
 		BEGIN
 			IF (NOT FLAGS.IS_GROUPS_DELETED) THEN
 				FLAGS.IS_STUDENTS_DELETED := FALSE;
 			END IF;
+		
 		END AFTER STATEMENT;
 	
 	END STUDENTS_COMPOUND_DELETE;
@@ -290,6 +326,15 @@
 			END IF;
 			
 		END BEFORE EACH ROW;
+		
+		AFTER EACH ROW IS
+		BEGIN
+			-- Log insertion to GROUPS if not restoring table condition by logs
+			IF NOT FLAGS.IS_RESTORING_TABLES_BY_LOG THEN
+				INSERT INTO LOGS (TABLE_NAME, OPERATION_TYPE, ID_OLD, ID_NEW, NAME_OLD, NAME_NEW, NUMB_FIELD_OLD, NUMB_FIELD_NEW)
+				VALUES('GROUPS', 'INSERT', NULL, :NEW.ID, NULL, :NEW.NAME, NULL, :NEW.C_VAL);
+			END IF;
+		END AFTER EACH ROW;
 		
 	END GROUPS_COMPOUND_INSERT;
 	
@@ -346,7 +391,7 @@
 		BEFORE EACH ROW IS
 		BEGIN
 			-- Check unique name
-			IF UPDATING('NAME') THEN
+			IF (UPDATING('NAME') AND :NEW.NAME != :OLD.NAME) THEN
 				IF (:NEW.NAME MEMBER OF Group_names) THEN
 					FLAGS.IS_GROUPS_ID_UPDATED := FALSE;
 	 				RAISE_APPLICATION_ERROR(-20005, 'Группа с именем ' || :NEW.NAME || ' уже существует');
@@ -354,7 +399,7 @@
 			END IF;
 		
 			-- Check unique id
-			IF UPDATING('ID') THEN
+			IF (UPDATING('ID') AND :NEW.ID != :OLD.ID) THEN
 				IF (:NEW.ID MEMBER OF Group_IDs) THEN
 					FLAGS.IS_GROUPS_ID_UPDATED := FALSE;
 					RAISE_APPLICATION_ERROR(-20006, 'Группа с ID= ' || :NEW.ID || ' уже существует');
@@ -365,9 +410,17 @@
 		-- This may cause mutation error due to selecting for updating GROUPS table at STUDENTS trigger
 		AFTER EACH ROW IS
 		BEGIN
-			IF UPDATING('ID') THEN
+			IF (UPDATING('ID') AND :NEW.ID != :OLD.ID) THEN
 				-- Update child students
 				UPDATE STUDENTS SET GROUP_ID=:NEW.ID WHERE GROUP_ID=:OLD.ID;
+			END IF;
+		
+			-- If GROUPS table changed by user (and not cascade changing from changing child students) and LOG is not restored
+			IF NOT FLAGS.IS_STUDENTS_GROUPID_UPDATED THEN
+				IF NOT FLAGS.IS_RESTORING_TABLES_BY_LOG THEN
+					INSERT INTO LOGS (TABLE_NAME, OPERATION_TYPE, ID_OLD, ID_NEW, NAME_OLD, NAME_NEW, NUMB_FIELD_OLD, NUMB_FIELD_NEW)
+					VALUES('GROUPS', 'UPDATE', :OLD.ID, :NEW.ID, :OLD.NAME, :NEW.NAME, :OLD.C_VAL, :NEW.C_VAL);
+				END IF;
 			END IF;
 		END AFTER EACH ROW;
 		
@@ -381,25 +434,8 @@
 		
 	END GROUPS_COMPOUND_UPDATE;
 	
-		
 	
-	--STUDENTS must be updated AFTER GROUPS, because this will invoke UPDATE ON STUDENTS trigger, which
-	--updates GROUPS records with GROUPS.ID = (:NEW) STUDENTS.GROUP_ID.
-	--If STUDENTS updated BEFORE GROUPS, it would cause error, bacause GROUPS.ID did not updated yet
-	
-	--Also C_VAL must be setted to 0 here, bacause cascading call of after update on student
-	--trigges for all connected STUDENTS records will write sum correct C_VAL to 0
-	CREATE OR REPLACE TRIGGER GROUPS_AFTER_UPDATE
-	AFTER UPDATE ON GROUPS
-	FOR EACH ROW
-	BEGIN 
-		--C_VAL value will be correctly setted by invoked AFTER UPDATE ON STUDENTS triggers
-		:NEW.C_VAL := 0;
-		--New ID is unique, update connected students
-		UPDATE STUDENTS SET GROUP_ID = :NEW.ID WHERE GROUP_ID = :OLD.ID;
-	END;
-	
-	            
+	-- This trigger causes cascade deletion on child students. Before final deletion and logging of group, child students are deleted an logged
 	CREATE OR REPLACE TRIGGER GROUPS_COMPOUND_DELETE
 	FOR DELETE ON GROUPS
 	COMPOUND TRIGGER
@@ -416,6 +452,15 @@
 				DELETE FROM STUDENTS WHERE STUDENTS.GROUP_ID = :OLD.ID;
 			END IF;
 		END BEFORE EACH ROW;
+		
+		AFTER EACH ROW IS
+		BEGIN
+			-- Add to log if this action is not invoked by restoring table conditions via logs
+			IF NOT FLAGS.IS_RESTORING_TABLES_BY_LOG THEN
+				INSERT INTO LOGS (TABLE_NAME, OPERATION_TYPE, ID_OLD, ID_NEW, NAME_OLD, NAME_NEW, NUMB_FIELD_OLD, NUMB_FIELD_NEW)
+				VALUES('GROUPS', 'DELETE', :OLD.ID, NULL, :OLD.NAME, NULL, NULL, NULL);
+			END IF;
+		END AFTER EACH ROW;
 		
 		AFTER STATEMENT IS
 		BEGIN
